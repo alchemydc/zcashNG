@@ -1,0 +1,4 @@
+# Intentionally empty. Mounted into the Zebra container at /etc/zebra/zebrad.toml
+# for mainnet and testnet. All effective configuration comes from ZEBRA_* env
+# vars in docker-compose.yml. Regtest replaces this mount with config/zebra.regtest.toml
+# via ZCASHNG_ZEBRA_EXTRA_CONFIG in env/regtest.env.

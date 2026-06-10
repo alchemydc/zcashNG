@@ -1,0 +1,22 @@
+# Zebra regtest configuration. Mounted at /etc/zebra/zebrad.toml when
+# env/regtest.env is used. The network value matches ZCASHNG_NETWORK=Regtest;
+# activation heights are all 1 so any subsequent block hits every network
+# upgrade. The CI smoke test (scripts/regtest-mine.sh) validates this works
+# end-to-end through the rpc-router.
+#
+# If a newer network upgrade (NU6.1, NU6.2, …) lands in Zebra's regtest
+# parameter list, add it here. The env-vars-win merge semantics mean
+# docker-compose.yml can still override anything declared here per-deploy.
+
+[network]
+network = "Regtest"
+
+[network.testnet_parameters.activation_heights]
+BeforeOverwinter = 1
+Overwinter = 1
+Sapling = 1
+Blossom = 1
+Heartwood = 1
+Canopy = 1
+NU5 = 1
+NU6 = 1

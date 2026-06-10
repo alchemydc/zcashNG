@@ -1,0 +1,232 @@
+# zcashNG — single-compose-file Zcash full node + wallet + RPC router stack.
+#
+# Mainnet is the default. Testnet and regtest are selected via
+#   docker compose --env-file env/<network>.env up -d
+# (see env/testnet.env and env/regtest.env). No per-network overlays exist.
+#
+# Monitoring (Prometheus + Grafana + Alertmanager) is on by default because
+# .env.example ships COMPOSE_PROFILES=monitoring. To run a bare node, comment
+# that line out of .env.
+#
+# Top-level `name:` is fixed so volume / network identifiers don't depend on
+# the working-directory name. The Docker network `zcashng-net` is the stable
+# attach point for downstream containers (`docker run --network zcashng-net …`).
+name: zcashng
+
+x-hardening: &hardening
+  security_opt:
+    - "no-new-privileges:true"
+  cap_drop:
+    - ALL
+
+networks:
+  zcashng-net:
+    name: zcashng-net
+    driver: bridge
+
+services:
+
+  # --------------------------------------------------------------------------
+  # zebra — Zcash full node (consensus + chain state + p2p)
+  # Multi-arch image; runs as UID 10001 internally after the entrypoint
+  # drops privileges. cap_add lets the entrypoint chown bind-mounted dirs.
+  # --------------------------------------------------------------------------
+  zebra:
+    <<: *hardening
+    image: ${ZCASHNG_ZEBRA_IMAGE:-zfnd/zebra:latest}
+    container_name: zcashng_zebra
+    restart: unless-stopped
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    environment:
+      RUST_LOG: ${ZCASHNG_ZEBRA_RUST_LOG:-info}
+      # Config-merge: zebrad reads CONFIG_FILE_PATH (set by the image entrypoint)
+      # then layers ZEBRA_* env vars on top (env wins). The default mount points
+      # at a tracked empty TOML; regtest swaps it for one carrying activation heights.
+      CONFIG_FILE_PATH: /etc/zebra/zebrad.toml
+      ZEBRA_NETWORK__NETWORK: ${ZCASHNG_NETWORK:-Mainnet}
+      ZEBRA_NETWORK__LISTEN_ADDR: 0.0.0.0:${ZCASHNG_P2P_PORT:-8233}
+      ZEBRA_RPC__LISTEN_ADDR: 0.0.0.0:8232
+      ZEBRA_RPC__ENABLE_COOKIE_AUTH: "false"
+      ZEBRA_METRICS__ENDPOINT_ADDR: 0.0.0.0:9999
+      ZEBRA_HEALTH__LISTEN_ADDR: 0.0.0.0:8080
+      ZEBRA_HEALTH__MIN_CONNECTED_PEERS: ${ZEBRA_HEALTH__MIN_CONNECTED_PEERS:-1}
+      ZEBRA_HEALTH__READY_MAX_BLOCKS_BEHIND: ${ZEBRA_HEALTH__READY_MAX_BLOCKS_BEHIND:-2}
+      ZEBRA_HEALTH__ENFORCE_ON_TEST_NETWORKS: ${ZEBRA_HEALTH__ENFORCE_ON_TEST_NETWORKS:-false}
+      ZEBRA_TRACING__FILTER: ${ZEBRA_TRACING__FILTER:-info}
+      ZEBRA_STATE__CACHE_DIR: /home/zebra/.cache/zebra
+    volumes:
+      - ${ZCASHNG_DATA_DIR:-./data}/zebra:/home/zebra/.cache/zebra
+      - ${ZCASHNG_ZEBRA_EXTRA_CONFIG:-./config/zebra.empty.toml}:/etc/zebra/zebrad.toml:ro
+    ports:
+      # p2p: published on all interfaces so inbound peers can reach the node.
+      - "${ZCASHNG_P2P_PORT:-8233}:${ZCASHNG_P2P_PORT:-8233}"
+      # health: loopback by default (set ZCASHNG_BIND_ADDR=0.0.0.0 to widen).
+      - "${ZCASHNG_BIND_ADDR:-127.0.0.1}:${ZCASHNG_HEALTH_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+      start_interval: 5s
+    networks:
+      - zcashng-net
+
+  # --------------------------------------------------------------------------
+  # zallet — Zcash wallet (Zaino-indexer-embedded; talks to Zebra RPC)
+  # electriccoinco/zallet:latest is amd64-only as of v0.1.0-alpha.3. On arm64
+  # hosts (Apple Silicon, AWS Graviton) Docker will use binfmt emulation, which
+  # is slow but functional. When a multi-arch tag ships, drop the `platform:` line.
+  # No container healthcheck: distroless image has no shell. The rpc-router's
+  # /health endpoint reports Zallet reachability as a surrogate.
+  # --------------------------------------------------------------------------
+  zallet:
+    <<: *hardening
+    image: ${ZCASHNG_ZALLET_IMAGE:-electriccoinco/zallet:latest}
+    container_name: zcashng_zallet
+    restart: unless-stopped
+    platform: ${ZCASHNG_ZALLET_PLATFORM:-linux/amd64}
+    user: "1000:1000"
+    command:
+      - "--datadir"
+      - "/var/lib/zallet"
+      - "--config"
+      - "/etc/zallet/zallet.toml"
+      - "start"
+    environment:
+      RUST_LOG: ${ZCASHNG_ZALLET_RUST_LOG:-info,hyper_util=warn,reqwest=warn}
+    volumes:
+      - ${ZCASHNG_DATA_DIR:-./data}/zallet:/var/lib/zallet
+      - ${ZCASHNG_ZALLET_CONFIG:-./config/zallet.toml}:/etc/zallet/zallet.toml:ro
+      - ./config/zallet_identity.txt:/etc/zallet/identity.txt:ro
+    depends_on:
+      zebra:
+        condition: service_healthy
+    networks:
+      - zcashng-net
+
+  # --------------------------------------------------------------------------
+  # rpc-router — single host-facing JSON-RPC front door. Dispatches each method
+  # to Zebra or Zallet based on the merged OpenRPC schema. Built locally on
+  # first run; once the GHCR image exists, `docker compose pull` switches over.
+  # --------------------------------------------------------------------------
+  rpc-router:
+    <<: *hardening
+    image: ${ZCASHNG_RPC_ROUTER_IMAGE:-ghcr.io/alchemydc/zcashng-rpc-router:latest}
+    container_name: zcashng_rpc_router
+    restart: unless-stopped
+    build:
+      context: ./rpc-router
+    environment:
+      RUST_LOG: ${ZCASHNG_RPC_ROUTER_RUST_LOG:-info}
+      ZEBRA_URL: http://zebra:8232/
+      ZALLET_URL: http://zallet:28232/
+      LISTEN_PORT: "8232"
+      # Outgoing auth (router → Zebra/Zallet): both backends are no-auth inside
+      # zcashng-net so these stay empty. Set both if you re-enable backend auth.
+      RPC_USER: ""
+      RPC_PASSWORD: ""
+      # Optional incoming auth (clients → router): if both set, router enforces
+      # HTTP Basic on the host-facing port. Anonymous by default.
+      ZCASHNG_RPC_USER: ${ZCASHNG_RPC_USER:-}
+      ZCASHNG_RPC_PASSWORD: ${ZCASHNG_RPC_PASSWORD:-}
+    ports:
+      - "${ZCASHNG_BIND_ADDR:-127.0.0.1}:${ZCASHNG_RPC_PORT:-8232}:8232"
+    depends_on:
+      zebra:
+        condition: service_healthy
+      zallet:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rpc-router", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 5s
+    networks:
+      - zcashng-net
+
+  # --------------------------------------------------------------------------
+  # Monitoring (Prometheus + Grafana + Alertmanager). Enabled by default via
+  # COMPOSE_PROFILES=monitoring in .env.example. Comment that out to skip.
+  # --------------------------------------------------------------------------
+  prometheus:
+    <<: *hardening
+    image: prom/prometheus:v3.2.0
+    container_name: zcashng_prometheus
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    user: "65534:65534"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - ${ZCASHNG_DATA_DIR:-./data}/prometheus:/prometheus
+    ports:
+      - "${ZCASHNG_BIND_ADDR:-127.0.0.1}:${ZCASHNG_PROMETHEUS_PORT:-9094}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - zcashng-net
+
+  grafana:
+    <<: *hardening
+    image: grafana/grafana:11.5.1
+    container_name: zcashng_grafana
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    user: "472:472"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${ZCASHNG_GRAFANA_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/zebra_overview.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ${ZCASHNG_DATA_DIR:-./data}/grafana:/var/lib/grafana
+    ports:
+      - "${ZCASHNG_BIND_ADDR:-127.0.0.1}:${ZCASHNG_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - zcashng-net
+
+  alertmanager:
+    <<: *hardening
+    image: prom/alertmanager:v0.28.1
+    container_name: zcashng_alertmanager
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    user: "65534:65534"
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ${ZCASHNG_DATA_DIR:-./data}/alertmanager:/alertmanager
+    ports:
+      - "${ZCASHNG_BIND_ADDR:-127.0.0.1}:${ZCASHNG_ALERTMANAGER_PORT:-9093}:9093"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - zcashng-net
