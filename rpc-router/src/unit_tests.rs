@@ -62,10 +62,8 @@ fn test_annotate_methods_sets_x_server() {
 
 #[test]
 fn test_annotate_methods_non_object_entry_does_not_panic() {
-    // A schema that contains a non-object method entry (e.g. a bare string).
     let schema = json!({ "methods": ["not-an-object", { "name": "getblock" }] });
     let mut methods = extract_methods_array(&schema);
-    // Must not panic — the non-object entry is silently skipped.
     annotate_methods_with_server(&mut methods, "zebra");
     assert_eq!(methods[1]["x-server"], "zebra");
 }
@@ -139,17 +137,17 @@ fn test_merge_openrpc_schemas_info_fields_present() {
 
 #[test]
 #[serial]
-fn test_config_from_env_uses_defaults() {
+fn test_config_from_env_outgoing_auth_defaults_empty() {
     env::remove_var("RPC_USER");
     env::remove_var("RPC_PASSWORD");
     let config = Config::from_env();
-    assert_eq!(config.rpc_user, "zebra");
-    assert_eq!(config.rpc_password, "zebra");
+    assert_eq!(config.rpc_user, "");
+    assert_eq!(config.rpc_password, "");
 }
 
 #[test]
 #[serial]
-fn test_config_from_env_reads_rpc_credentials() {
+fn test_config_from_env_reads_outgoing_rpc_credentials_when_set() {
     env::set_var("RPC_USER", "alice");
     env::set_var("RPC_PASSWORD", "s3cr3t");
     let config = Config::from_env();
@@ -158,3 +156,72 @@ fn test_config_from_env_reads_rpc_credentials() {
     env::remove_var("RPC_USER");
     env::remove_var("RPC_PASSWORD");
 }
+
+#[test]
+#[serial]
+fn test_config_from_env_incoming_auth_none_when_unset() {
+    env::remove_var("ZCASHNG_RPC_USER");
+    env::remove_var("ZCASHNG_RPC_PASSWORD");
+    let config = Config::from_env();
+    assert!(config.incoming_basic_auth.is_none());
+}
+
+#[test]
+#[serial]
+fn test_config_from_env_incoming_auth_some_when_both_set() {
+    env::set_var("ZCASHNG_RPC_USER", "alice");
+    env::set_var("ZCASHNG_RPC_PASSWORD", "s3cr3t");
+    let config = Config::from_env();
+    assert_eq!(
+        config.incoming_basic_auth,
+        Some(("alice".to_string(), "s3cr3t".to_string()))
+    );
+    env::remove_var("ZCASHNG_RPC_USER");
+    env::remove_var("ZCASHNG_RPC_PASSWORD");
+}
+
+#[test]
+#[serial]
+fn test_config_from_env_incoming_auth_none_when_only_one_set() {
+    env::set_var("ZCASHNG_RPC_USER", "alice");
+    env::remove_var("ZCASHNG_RPC_PASSWORD");
+    let config = Config::from_env();
+    assert!(config.incoming_basic_auth.is_none());
+    env::remove_var("ZCASHNG_RPC_USER");
+}
+
+// --- HealthState ---
+
+#[test]
+fn test_health_state_snapshot_false_when_never_probed() {
+    let state = HealthState::new();
+    let (zebra_ok, zallet_ok) = state.liveness_snapshot();
+    assert!(!zebra_ok);
+    assert!(!zallet_ok);
+}
+
+#[test]
+fn test_health_state_snapshot_true_when_recent_probe() {
+    let state = HealthState::new();
+    state.last_zebra_ok.store(now_ms(), Ordering::Relaxed);
+    state.last_zallet_ok.store(now_ms(), Ordering::Relaxed);
+    let (zebra_ok, zallet_ok) = state.liveness_snapshot();
+    assert!(zebra_ok);
+    assert!(zallet_ok);
+}
+
+#[test]
+fn test_health_state_snapshot_false_when_probe_stale() {
+    let state = HealthState::new();
+    // 2 minutes ago — older than LIVENESS_FRESHNESS_MS (60s).
+    let stale = now_ms() - 120_000;
+    state.last_zebra_ok.store(stale, Ordering::Relaxed);
+    state.last_zallet_ok.store(stale, Ordering::Relaxed);
+    let (zebra_ok, zallet_ok) = state.liveness_snapshot();
+    assert!(!zebra_ok);
+    assert!(!zallet_ok);
+}
+
+// The test for Config requires PartialEq on the auth tuple comparison; we
+// don't derive it on Config itself (no need), so the equality assertion above
+// uses Option<(String,String)> directly.

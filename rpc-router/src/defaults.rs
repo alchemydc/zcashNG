@@ -5,12 +5,6 @@ pub(crate) const ZEBRA_URL: &str = "http://zebra:8232/";
 
 pub(crate) const ZALLET_URL: &str = "http://zallet:28232/";
 
-pub(crate) const ZAINO_URL: &str = "http://zaino:8237/";
-
-pub(crate) const RPC_USER: &str = "zebra";
-
-pub(crate) const RPC_PASSWORD: &str = "zebra";
-
 pub(crate) const CORS_ORIGIN: &str = "https://playground.open-rpc.org";
 
 pub(crate) const LISTEN_PORT: u16 = 8232;

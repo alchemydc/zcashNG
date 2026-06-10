@@ -16,4 +16,10 @@ RUN cargo build --release --bin rpc-router
 # We do not need the Rust toolchain to run the binary!
 FROM gcr.io/distroless/cc-debian12 AS runtime
 COPY --from=builder /app/target/release/rpc-router /usr/local/bin/
+# Distroless has no shell, so HEALTHCHECK is exec-form and calls the binary's
+# own `healthcheck` subcommand. The subcommand reads LISTEN_PORT from env and
+# probes http://127.0.0.1:$LISTEN_PORT/health.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/rpc-router", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/rpc-router"]
+CMD ["serve"]
