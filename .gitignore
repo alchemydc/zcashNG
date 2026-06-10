@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Operator-local environment
+.env
+
+# Bind-mounted state directories (configurable via ZCASHNG_DATA_DIR)
+data/
+data-testnet/
+data-regtest/
+
+# Generated config (the .example templates are tracked)
+config/zallet.toml
+config/zallet.regtest.toml
+config/zallet_identity.txt
