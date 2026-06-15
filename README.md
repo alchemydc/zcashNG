@@ -2,22 +2,22 @@
 
 A single-compose-file Zcash full-node stack: **Zebra** + **Zallet** + a unified **JSON-RPC router** + monitoring. Mainnet by default. Designed to be the smallest sensible setup for running a Zcash node + wallet behind one operator-facing endpoint.
 
-```
-                  ┌──── inbound peers ──── :8233 (all interfaces)
-                  ▼
-  ┌─────────┐    ┌──────────────┐
-  │ zebra   │◄───┤ rpc-router   │◄── 127.0.0.1:8232  (operator / apps)
-  └────┬────┘    └──┬───────────┘
-       │            ▼
-       │         ┌────────┐
-       └────────►│ zallet │   (no host exposure)
-                 └────────┘
-       │
-       ▼
-  ┌────────────┐  ┌─────────┐  ┌──────────────┐
-  │ prometheus │◄─┤ grafana │  │ alertmanager │
-  └────────────┘  └─────────┘  └──────────────┘
-       127.0.0.1:9094  3000        9093
+```mermaid
+flowchart LR
+  peers([inbound peers]) -->|TCP :8233| zebra
+  apps([operator / apps]) -->|HTTP 127.0.0.1:8232| router
+
+  subgraph stack[zcashng-net]
+    router[rpc-router] -->|HTTP zebra:8232| zebra[zebra]
+    router -->|HTTP zallet:28232| zallet[zallet]
+  end
+
+  subgraph monitoring
+    prometheus -->|scrape :9999/metrics| zebra
+    prometheus -->|scrape :8232/health| router
+    grafana --> prometheus
+    prometheus --> alertmanager
+  end
 ```
 
 ## Quick start
